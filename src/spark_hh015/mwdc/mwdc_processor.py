@@ -2,22 +2,26 @@ from pyspark.sql import SparkSession, DataFrame, Window
 from pyspark.sql import functions as F
 import argparse
 from pathlib import Path
+import sys
+import pathlib
 
+THISDIR = pathlib.Path(__file__).parent
 CH2NS = 0.0009765625 # AMANEQ HRTDC time unit to ns
 
 planes = ['dc31_x1','dc31_x2','dc31_y1','dc31_y2','dc31_x3','dc31_x4','dc31_y3','dc31_y4','dc32_x1','dc32_x2','dc32_y1','dc32_y2']
-dc31_charge_range = [50,150]
-dc31_timing_range = [-35,15]
-dc32_charge_range = [50,150]
-dc32_timing_range = [-35,15]
+dc31_charge_range = [10,150]
+dc31_timing_range = [-60,0]
+dc32_charge_range = [10,150]
+dc32_timing_range = [-60,0]
 cell_size = 3.0
 half_cell_size = cell_size / 2.0
 planes_paires = [('dc31_x1', 'dc31_x2'), ('dc31_x3', 'dc31_x4'), ('dc31_y1', 'dc31_y2'), ('dc31_y3', 'dc31_y4'), ('dc32_x1', 'dc32_x2'), ('dc32_y1', 'dc32_y2')]
-plane_shifts = [0.0, 0.0, 0.08, 0.15, -0.08, 0.0]
+plane_shifts = [0.07, 0.04, 0.08, 0.15, -0.08, 0.0]
 center_id1 = 7.25
 center_id2 = 7.75
-dc31_x3_shift = 0.0
-dc31_y3_shift = -0.31
+dc31_x3_shift = 0.05
+dc31_y3_shift = -0.15
+runname="run1039"
 
 def decode_mwdc_amaneq(spark: SparkSession, df: DataFrame) -> DataFrame:
     # Filter MWDC data and decode
@@ -38,12 +42,12 @@ def decode_mwdc_amaneq(spark: SparkSession, df: DataFrame) -> DataFrame:
     # +-------------+----------+----+-------+--------+-------+-------+-----+-----------+----------+--------+--------+--------------------+
 
     # Filter SRPPAC anode data and decode
-    df_sra = df.filter("femType==5 and femId==615").select("data").withColumn("decoded",F.expr("decode_hrtdc_segdata(data)"))
+    df_sra = df.filter("femType==5 and femId==614").select("data").withColumn("decoded",F.expr("decode_hrtdc_segdata(data)"))
     df_sra = df_sra.select("decoded.*").select("hbf.*","data").select("hbfNumber","data").filter("array_size(decoded.data)>0")
-    df_sra = df_sra.withColumn("ex",F.explode("data")).select("hbfNumber","ex.*").filter("ch==0")
-    df_sra = df_sra.withColumn("rand",F.rand().cast("float")).withColumn("tcal", (F.col("time").cast("float") + F.col("rand"))*F.lit(CH2NS).cast("float")).drop("time").drop("rand")
+    df_sra = df_sra.withColumn("ex",F.explode("data")).select("hbfNumber","ex.*").filter("ch==4") # anode channel is ch=4
+    df_sra = df_sra.withColumn("rand",F.rand().cast("float")).withColumn("tcal", (F.col("time").cast("float") + F.col("rand"))*F.lit(CH2NS).cast("float")).drop("rand")
     df_sra = df_sra.withColumn("rand",F.rand().cast("float")).withColumn("sra_charge", (F.col("tot").cast("float") + F.col("rand"))*F.lit(CH2NS).cast("float")).drop("tot").drop("rand")
-    df_sra = df_sra.withColumnRenamed("tcal","sra_timing").select("hbfNumber","sra_timing")
+    df_sra = df_sra.withColumnRenamed("tcal","sra_timing").withColumnRenamed("time","sra_tdc_raw").select("hbfNumber","sra_timing","sra_tdc_raw")
 
     # Select only the fastest sra hit per event
     from pyspark.sql import Window
@@ -70,11 +74,12 @@ def decode_mwdc_amaneq(spark: SparkSession, df: DataFrame) -> DataFrame:
     df_dc = df_dc.withColumn("tcal_c", F.expr("tcal-sra_timing")).drop("tcal").drop("sra_timing")
 
     # Map dc31 and dc32
-    df_map31 = spark.read.csv("map/dc31_map.csv",inferSchema=True,header=True).withColumn("id",F.col("id").cast("int")).withColumn("femId",F.col("femId").cast("int")).withColumn("ch",F.col("ch").cast("int"))
+    input_dc31 = str(THISDIR / "map/dc31_map.csv")   
+    df_map31 = spark.read.csv(input_dc31,inferSchema=True,header=True).withColumn("id",F.col("id").cast("int")).withColumn("femId",F.col("femId").cast("int")).withColumn("ch",F.col("ch").cast("int"))
     df_dc31 = df_dc.join(df_map31,on=["ch","femId"]).drop("ch").drop("femId")
 
-
-    df_map32 = spark.read.csv("map/dc32_map.csv",inferSchema=True,header=True).withColumn("id",F.col("id").cast("int")).withColumn("femId",F.col("femId").cast("int")).withColumn("ch",F.col("ch").cast("int"))
+    input_dc32 = str(THISDIR / "map/dc32_map.csv")   
+    df_map32 = spark.read.csv(input_dc32,inferSchema=True,header=True).withColumn("id",F.col("id").cast("int")).withColumn("femId",F.col("femId").cast("int")).withColumn("ch",F.col("ch").cast("int"))
     df_dc32 = df_dc.join(df_map32,on=["ch","femId"]).drop("ch").drop("femId")
 
     # +---------+-----+-------------------+---+
@@ -143,9 +148,9 @@ def decode_mwdc_amaneq(spark: SparkSession, df: DataFrame) -> DataFrame:
     df_mwdc = df_mwdc.join(df_sra,on=["hbfNumber"])
     return df_mwdc
 
-def calib_mwdc_data(spark: SparkSession, df: DataFrame) -> DataFrame:
+def calib_mwdc_data(spark: SparkSession, df: DataFrame, for_samidare: bool) -> DataFrame:
     # Calibrate MWDC data to get drift length for each plane
-    rdf = df.select("hbfNumber")
+    rdf = df.select("hbfNumber","sra_tdc_raw")
     for plane in planes:
         # Create columns for the wire with loargest charge
         dfp = df.select("hbfNumber", f"{plane}_id",f"{plane}_charge",f"{plane}_timing")
@@ -154,7 +159,7 @@ def calib_mwdc_data(spark: SparkSession, df: DataFrame) -> DataFrame:
                  .withColumn("id0",F.expr(f"element_at({plane}_id, 1)"))
         
         # Monotone converter
-        df_conv = spark.read.csv(f"prm/{plane}_drift_calib_data.csv",inferSchema=True,header=True)
+        df_conv = spark.read.csv(f"prm/{plane}_drift_calib_data_{runname}.csv",inferSchema=True,header=True)
         df_conv = df_conv.withColumn("histy_x", F.col("histy_x").cast("float")) \
                          .withColumn("tx", F.col("tx").cast("float"))
         w = Window.orderBy(F.col("histy_x"))
@@ -242,15 +247,80 @@ def calib_mwdc_data(spark: SparkSession, df: DataFrame) -> DataFrame:
              .withColumn("dc31_y", F.expr("(dc31_y1_posi + dc31_y2_posi + dc31_y3_posi + dc31_y4_posi)/4.0f")) \
              .withColumn("dc32_x", F.expr("(dc32_x1_posi + dc32_x2_posi)/2.0f")) \
              .withColumn("dc32_y", F.expr("(dc32_y1_posi + dc32_y2_posi)/2.0f"))
+    if for_samidare:
+        # Average plane Z positions
+        Z_DC31_X = -(10.3+7.3-1.7-4.7)/4.0
+        Z_DC31_Y = -(4.3+1.3-7.7-10.7)/4.0
+        Z_DC32_X = -(4.5+1.5)/2.0
+        Z_DC32_Y = -(-1.5-4.5)/2.0
+        
+        # Detector Z positions
+        Z_DC31 = -271.5 # mm
+        Z_DC32 = 787.97 # mm
+        Z_TRG1 = 229.2 # mm
+        Z_TRG2 = 400.7 # mm
+
+        L2X = Z_DC32 - Z_TRG1 + Z_DC32_X
+        L2Y = Z_DC32 - Z_TRG1 + Z_DC32_Y
+        L1X = Z_DC31 - Z_TRG1 + Z_DC31_X
+        L1Y = Z_DC31 - Z_TRG1 + Z_DC31_Y
+        rdf = rdf.withColumn("x_z229", F.expr(f"-(dc31_x * {L2X} - dc32_x * {L1X})/(ABS({L1X}) + ABS({L2X}))")) \
+                 .withColumn("y_z229", F.expr(f"(dc31_y * {L2Y} - dc32_y * {L1Y})/(ABS({L1Y}) + ABS({L2Y}))"))
+        L2X = Z_DC32 - Z_TRG2 + Z_DC32_X
+        L2Y = Z_DC32 - Z_TRG2 + Z_DC32_Y
+        L1X = Z_DC31 - Z_TRG2 + Z_DC31_X
+        L1Y = Z_DC31 - Z_TRG2 + Z_DC31_Y
+        rdf = rdf.withColumn("x_z400", F.expr(f"-(dc31_x * {L2X} - dc32_x * {L1X})/(ABS({L1X}) + ABS({L2X}))")) \
+                 .withColumn("y_z400", F.expr(f"(dc31_y * {L2Y} - dc32_y * {L1Y})/(ABS({L1Y}) + ABS({L2Y}))"))
+        rdf = rdf.select("hbfNumber","dc31_x", "dc31_y", "dc32_x", "dc32_y", "x_z229", "y_z229", "x_z400", "y_z400", "sra_tdc_raw")
 
     return rdf
 
-if __name__ == "__main__":
+
+def create_spark(args) -> SparkSession:
+    b = (
+        SparkSession.builder.master("local[*]")
+        .config("spark.driver.memory","20g")
+        .config("spark.executor.memory","20g")
+        .config("spark.sql.shuffle.partitions","32")
+        .config("spark.sql.files.maxPartitionBytes","512m")
+    )
+
+    if args.gpu:
+        if not args.spark_oedo_jar or not args.rapids_jar:
+            raise SystemExit("ERROR: --gpu requires --spark-oedo-jar and --rapids-jar")
+
+        jars = f"{args.spark_oedo_jar},{args.rapids_jar}"
+        b = ( b
+            .config("spark.jars", jars)
+            .config("spark.plugins","com.nvidia.spark.SQLPlugin")
+            .config("spark.kryo.registrator","com.nvidia.spark.rapids.GpuKryoRegistrator")
+            .config("spark.rapids.sql.explain","NONE")
+            .config("spark.rapids.sql.concurrentGpuTasks","2")
+            .config("spark.rapids.memory.pinnedPool.size","2g")
+            .config("spark.rapids.memory.gpu.allocFraction","0.3")
+            .config("spark.rapids.memory.gpu.minAllocFraction","0.01")
+        )
+    else:
+        jars = f"{args.spark_oedo_jar}"
+        b = ( b
+            .config("spark.plugins","").config("spark.rapids.sql.enabled","false")
+            .config("spark.jars", jars)
+        )
+
+    return b.getOrCreate()
+
+
+def main():
     parser = argparse.ArgumentParser(description='Decode raw parquet files and process MWDC data')
 
     parser.add_argument('input_file', help='input file')
     parser.add_argument('--output-file', help='output file (default: [input_file]_mwdc.parquet)')
     parser.add_argument('--output-wire-data', action='store_true', help='Output wire-by-wire hit data for calibration')
+    parser.add_argument('--output-for-samidare', action='store_true', help='Outputs for samidare')
+    parser.add_argument("--gpu", action="store_true", help="Enable RAPIDS (requires rapids jar + compatible Spark)")
+    parser.add_argument("--spark-oedo-jar", default="", help="Path to spark-oedo-package_*.jar (GPU mode)")
+    parser.add_argument("--rapids-jar", default="", help="Path to rapids-4-spark_*.jar (GPU mode)")
     args = parser.parse_args()
 
     # mwdc_processor.py filename
@@ -260,27 +330,7 @@ if __name__ == "__main__":
     stem = Path(fname).stem
 
     # Create a spark session
-    #spark  = SparkSession.builder.master("local[*]") \
-    #        .config("spark.driver.memory","30g") \
-    #        .config("spark.executor.memory","30g") \
-    #        .getOrCreate()
-
-    # Create a spark session with GPU
-    # spark.sql.shuffle.partitions = number of cores is optimal
-    spark = SparkSession.builder.master("local[*]") \
-            .config("spark.driver.memory","20g") \
-            .config("spark.executor.memory","20g") \
-            .config("spark.sql.shuffle.partitions","32") \
-            .config("spark.jars","/home/h487/opt/spark-oedo/scala_package/target/scala-2.13/spark-oedo-package_2.13-1.0.jar,/home/h487/opt/rapids/rapids-4-spark_2.13-25.10.0.jar") \
-            .config("spark.rapids.sql.explain","NONE") \
-            .config("spark.rapids.sql.concurrentGpuTasks","2") \
-            .config("spark.rapids.memory.pinnedPool.size","2g") \
-            .config("spark.sql.files.maxPartitionBytes","512m") \
-            .config("spark.kryo.registrator","com.nvidia.spark.rapids.GpuKryoRegistrator") \
-            .config("spark.plugins","com.nvidia.spark.SQLPlugin") \
-            .config("spark.rapids.memory.gpu.allocFraction","0.8") \
-            .config("spark.rapids.memory.gpu.minAllocFraction","0.01") \
-            .getOrCreate()
+    spark = create_spark(args)
     spark.sparkContext.setLogLevel("ERROR")
 
     # Register decoder UDF
@@ -291,13 +341,19 @@ if __name__ == "__main__":
 
     df_mwdc = decode_mwdc_amaneq(spark, df)
     if not args.output_wire_data:
-        df_mwdc = calib_mwdc_data(spark, df_mwdc)
+        df_mwdc = calib_mwdc_data(spark, df_mwdc, args.output_for_samidare)
 
     # Write to parquet
     if args.output_file:
         ofname = args.output_file
     else:
-        ofname = stem + ("_mwdc.parquet")
+        dir = str(Path(fname).parent)
+        ofname = dir + "/" + stem + ("_mwdc.parquet")
+
     df_mwdc = df_mwdc.withColumn("runname",F.lit(stem))
     df_mwdc.printSchema()
     df_mwdc.write.mode("overwrite").parquet(ofname)
+
+
+if __name__ == "__main__":
+    main()
