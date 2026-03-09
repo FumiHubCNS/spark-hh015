@@ -2,12 +2,13 @@ from pyspark.sql import SparkSession, DataFrame, Window
 from pyspark.sql import functions as F
 import argparse
 from pathlib import Path
+import re
 
 CH2NS = 0.0009765625 # AMANEQ HRTDC time unit to ns
-TIME_RANGE_NS = (-50, -30) # valid time range for SRPPAC strip hits after anode time subtraction and ns2ns conversion
-HIT_SIZE_LIMIT = 7 # maximum number of hit strips per event to accept
-HALF_STRIP_SIZE = (2.55 / 2.0, -2.58 / 2.0) # [x,y] mm
-CENTER_ID = (16, 16) # [x,y] strip id
+TIME_RANGE_NS = (-50, 25) # valid time range for SRPPAC strip hits after anode time subtraction and ns2ns conversion
+HIT_SIZE_LIMIT = 9 # maximum number of hit strips per event to accept
+HALF_STRIP_SIZE = (2.55 / 2.0, 2.58 / 2.0) # [x,y] mm
+CENTER_ID = (15, 15) # [x,y] strip id
 CALIB_RUNNAME = 'run1008'
 
 
@@ -40,12 +41,12 @@ def decode_srppac_amaneq(spark: SparkSession, df: DataFrame, preamp_type: str) -
     df_sr = df_sr.withColumn("charge", F.expr("timingT - timingL"))
 
     # Map strip channel to rpa id for X
-    df_xmap = spark.read.csv(f'map/srx_{preamp_type}_map.csv', inferSchema = True, header = True).withColumn("id", F.col("id").cast("int"))
-    df_ymap = spark.read.csv(f'map/sry_{preamp_type}_map.csv', inferSchema = True, header = True).withColumn("id", F.col("id").cast("int"))
+    df_xmap = spark.read.csv(f'/home/h487/notebooks/jan2026/srppac/map/srx_{preamp_type}_map.csv', inferSchema = True, header = True).withColumn("id", F.col("id").cast("int"))
+    df_ymap = spark.read.csv(f'/home/h487/notebooks/jan2026/srppac/map/sry_{preamp_type}_map.csv', inferSchema = True, header = True).withColumn("id", F.col("id").cast("int"))
 
     # Apply strip-by-strip charge calibration
-    df_prm_x = spark.read.csv(f'prm/srx_charge_calib_{preamp_type}.csv', inferSchema = True, header = True)
-    df_prm_y = spark.read.csv(f'prm/sry_charge_calib_{preamp_type}.csv', inferSchema = True, header = True)
+    df_prm_x = spark.read.csv(f'/home/h487/notebooks/jan2026/srppac/prm/srx_charge_calib_{preamp_type}.csv', inferSchema = True, header = True)
+    df_prm_y = spark.read.csv(f'/home/h487/notebooks/jan2026/srppac/prm/sry_charge_calib_{preamp_type}.csv', inferSchema = True, header = True)
 
     dfs = [(df_xmap, df_prm_x), (df_ymap, df_prm_y)]
     df_xy_list = []
@@ -64,7 +65,7 @@ def decode_srppac_amaneq(spark: SparkSession, df: DataFrame, preamp_type: str) -
                      .withColumn("id1",F.expr(f"try_element_at(id, 2)")) \
                      .withColumn("id2",F.expr(f"try_element_at(id, 3)")) \
                      .withColumn("q0q1", F.expr("(charge0-charge1)/(charge0+charge1)"))
-        
+
         df_xy_list.append(df_xy)
 
     # Add suffix _y to all columns except hbfNumber
@@ -93,7 +94,7 @@ def calib_srppac_dqdx(spark: SparkSession, df: DataFrame) -> DataFrame:
         # Define q0q1 for calibration parameter
         dfxy = dfxy.withColumn("q0q1", F.expr("(charge0 - charge1)/(charge0 + charge1)"))
         # Monotone converter
-        df_conv = spark.read.csv(f"prm/srppac_q0q1_{planes[i]}_{CALIB_RUNNAME}.csv",inferSchema=True,header=True)
+        df_conv = spark.read.csv(f"/home/h487/notebooks/jan2026/srppac/prm/srppac_q0q1_{planes[i]}_{CALIB_RUNNAME}.csv",inferSchema=True,header=True)
         df_conv = df_conv.withColumn("histy_x", F.col("histy_x").cast("float")) \
                          .withColumn("tx", F.col("tx").cast("float"))
         w = Window.orderBy(F.col("histy_x"))
@@ -107,9 +108,11 @@ def calib_srppac_dqdx(spark: SparkSession, df: DataFrame) -> DataFrame:
         dfp = dfp.withColumn("randf", F.rand().cast("float")).withColumn("ins", F.expr(f"(tx_prev + (tx - tx_prev)*randf)*ABS({HALF_STRIP_SIZE[i]}f)")).drop("randf")
         
         # Calculate position
-        dfp = dfp.withColumn("ins", F.expr("CASE WHEN id1 = id0 + 1 THEN ins ELSE -ins END"))
-        dfp = dfp.withColumn("pos", F.expr(f"({CENTER_ID[i]}f - id0) * ABS({HALF_STRIP_SIZE[i]}f)*2.0f + ins - {HALF_STRIP_SIZE[i]}f"))
-
+        #dfp = dfp.withColumn("ins", F.expr("CASE WHEN id1 = id0 + 1 THEN ins ELSE -ins END"))
+        #dfp = dfp.withColumn("pos", F.expr(f"({CENTER_ID[i]}f - id0) * ABS({HALF_STRIP_SIZE[i]}f)*2.0f + ins - {HALF_STRIP_SIZE[i]}f"))
+        dfp = dfp.withColumn("ins", F.expr("CASE WHEN id1 = id0 + 1 THEN -ins ELSE ins END"))
+        dfp = dfp.withColumn("sedge", F.expr(f"CASE WHEN id1 = id0 + 1 THEN 0 ELSE -1*{HALF_STRIP_SIZE[i]}*2.0 END"))
+        dfp = dfp.withColumn("pos", F.expr(f"(id0-{CENTER_ID[i]}) * ABS({HALF_STRIP_SIZE[i]})*2.0 + ins + sedge")).drop("sedge")
         dfp = dfp.select("hbfNumber","pos","ins").withColumnRenamed("pos",f"sr_pos_{planes[i]}").withColumnRenamed("ins",f"sr_ins_{planes[i]}")
         rdf = rdf.join(dfp, on=["hbfNumber"], how="left")
 
@@ -134,6 +137,14 @@ if __name__ == "__main__":
 
     # stem = filename - extension
     stem = Path(fname).stem
+
+    # Extract runname from stem (runxxxx where xxxx is digits)
+    match = re.search(r'run\d{4}', stem)
+    if match:
+        runname = match.group()
+    else:
+        runname = stem  # fallback to full stem if no match
+    print('stem_srppac=',stem)
 
     # Create a spark session with GPU
     # spark.sql.shuffle.partitions = number of cores is optimal

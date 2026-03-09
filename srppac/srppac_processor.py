@@ -2,13 +2,15 @@ from pyspark.sql import SparkSession, DataFrame, Window
 from pyspark.sql import functions as F
 import argparse
 from pathlib import Path
+import re
 
 CH2NS = 0.0009765625 # AMANEQ HRTDC time unit to ns
 TIME_RANGE_NS = (-50, 300) # valid time range for SRPPAC strip hits after anode time subtraction and ns2ns conversion
 HIT_SIZE_LIMIT = 7 # maximum number of hit strips per event to accept
-HALF_STRIP_SIZE = (2.55 / 2.0, -2.58 / 2.0) # [x,y] mm
-CENTER_ID = (16, 16) # [x,y] strip id
-CALIB_RUNNAME = 'run1082'
+HALF_STRIP_SIZE = (2.55 / 2.0, 2.58 / 2.0) # [x,y] mm
+CENTER_ID = (15, 15) # [x,y] strip id
+CALIB_RUNNAME = 'run1027' 
+
 
 
 def decode_srppac_amaneq(spark: SparkSession, df: DataFrame, preamp_type: str) -> DataFrame:
@@ -107,9 +109,9 @@ def calib_srppac_dqdx(spark: SparkSession, df: DataFrame) -> DataFrame:
         dfp = dfp.withColumn("randf", F.rand().cast("float")).withColumn("ins", F.expr(f"(tx_prev + (tx - tx_prev)*randf)*ABS({HALF_STRIP_SIZE[i]}f)")).drop("randf")
         
         # Calculate position
-        dfp = dfp.withColumn("ins", F.expr("CASE WHEN id1 = id0 + 1 THEN ins ELSE -ins END"))
-        dfp = dfp.withColumn("pos", F.expr(f"({CENTER_ID[i]}f - id0) * ABS({HALF_STRIP_SIZE[i]}f)*2.0f + ins - {HALF_STRIP_SIZE[i]}f"))
-
+        dfp = dfp.withColumn("ins", F.expr("CASE WHEN id1 = id0 + 1 THEN -ins ELSE ins END"))
+        dfp = dfp.withColumn("sedge", F.expr(f"CASE WHEN id1 = id0 + 1 THEN 0 ELSE -1*{HALF_STRIP_SIZE[i]}*2.0 END"))
+        dfp = dfp.withColumn("pos", F.expr(f"(id0-{CENTER_ID[i]}) * ABS({HALF_STRIP_SIZE[i]})*2.0 + ins + sedge")).drop("sedge")
         dfp = dfp.select("hbfNumber","pos","ins").withColumnRenamed("pos",f"sr_pos_{planes[i]}").withColumnRenamed("ins",f"sr_ins_{planes[i]}")
         rdf = rdf.join(dfp, on=["hbfNumber"], how="left")
 
@@ -134,6 +136,13 @@ if __name__ == "__main__":
 
     # stem = filename - extension
     stem = Path(fname).stem
+    # Extract runname from stem (runxxxx where xxxx is digits)
+    match = re.search(r'run\d{4}', stem)
+    if match:
+        runname = match.group()
+    else:
+        runname = stem  # fallback to full stem if no match
+    print('stem_srppac=',stem)
 
     # Create a spark session with GPU
     # spark.sql.shuffle.partitions = number of cores is optimal

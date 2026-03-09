@@ -13,12 +13,13 @@ dc32_timing_range = [-60,0]
 cell_size = 3.0
 half_cell_size = cell_size / 2.0
 planes_paires = [('dc31_x1', 'dc31_x2'), ('dc31_x3', 'dc31_x4'), ('dc31_y1', 'dc31_y2'), ('dc31_y3', 'dc31_y4'), ('dc32_x1', 'dc32_x2'), ('dc32_y1', 'dc32_y2')]
-plane_shifts = [0.07, 0.04, 0.08, 0.15, -0.08, 0.0]
+plane_shifts = [0.07, 0.04, 0.08, 0.15, -0.06, 0.05]
 center_id1 = 7.25
 center_id2 = 7.75
 dc31_x3_shift = 0.05
-dc31_y3_shift = -0.15
-runname="run1039"
+dc31_y3_shift = -0.20
+calib_runname="run1027"
+
 
 def decode_mwdc_amaneq(spark: SparkSession, df: DataFrame) -> DataFrame:
     # Filter MWDC data and decode
@@ -155,7 +156,7 @@ def calib_mwdc_data(spark: SparkSession, df: DataFrame, for_samidare: bool) -> D
                  .withColumn("id0",F.expr(f"element_at({plane}_id, 1)"))
         
         # Monotone converter
-        df_conv = spark.read.csv(f"prm/{plane}_drift_calib_data_{runname}.csv",inferSchema=True,header=True)
+        df_conv = spark.read.csv(f"prm/{plane}_drift_calib_data_{calib_runname}.csv",inferSchema=True,header=True)
         df_conv = df_conv.withColumn("histy_x", F.col("histy_x").cast("float")) \
                          .withColumn("tx", F.col("tx").cast("float"))
         w = Window.orderBy(F.col("histy_x"))
@@ -238,6 +239,14 @@ def calib_mwdc_data(spark: SparkSession, df: DataFrame, for_samidare: bool) -> D
              .withColumn("dc31_y3_posi", F.expr(f"dc31_y3_posi + {dc31_y3_shift}f")) \
              .withColumn("dc31_y4_posi", F.expr(f"dc31_y4_posi + {dc31_y3_shift}f"))
 
+    # Invert y positions
+    rdf = rdf.withColumn("dc31_y1_posi", F.expr("-dc31_y1_posi")) \
+             .withColumn("dc31_y2_posi", F.expr("-dc31_y2_posi")) \
+             .withColumn("dc31_y3_posi", F.expr("-dc31_y3_posi")) \
+             .withColumn("dc31_y4_posi", F.expr("-dc31_y4_posi")) \
+             .withColumn("dc32_y1_posi", F.expr("-dc32_y1_posi")) \
+             .withColumn("dc32_y2_posi", F.expr("-dc32_y2_posi"))
+    
     # Calculate final positions (average)
     rdf = rdf.withColumn("dc31_x", F.expr("(dc31_x1_posi + dc31_x2_posi + dc31_x3_posi + dc31_x4_posi)/4.0f")) \
              .withColumn("dc31_y", F.expr("(dc31_y1_posi + dc31_y2_posi + dc31_y3_posi + dc31_y4_posi)/4.0f")) \
@@ -272,7 +281,8 @@ def calib_mwdc_data(spark: SparkSession, df: DataFrame, for_samidare: bool) -> D
 
     return rdf
 
-if __name__ == "__main__":
+
+def main():
     parser = argparse.ArgumentParser(description='Decode raw parquet files and process MWDC data')
 
     parser.add_argument('input_file', help='input file')
@@ -329,3 +339,7 @@ if __name__ == "__main__":
     df_mwdc = df_mwdc.withColumn("runname",F.lit(stem))
     df_mwdc.printSchema()
     df_mwdc.write.mode("overwrite").parquet(ofname)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,12 +1,14 @@
 #!/bin/bash
 #scp -p quser@192.168.1.218:~/exp/Himac_HH015/exp-config/himac_HH015/run_nlabdaq5/data/tdcdata/00/run00${1}.dat /home/h487/data/rawdata/
-streamingv1_to_parquet.py /mnt/data/h445_h487/nestdaq/tdcdata/00/run00${1}.dat /home/h487/data/parquet/run${1}.parquet #--max-blocks 100000
+#streamingv1_to_parquet.py /mnt/data/h445_h487/nestdaq/tdcdata/00/run00${1}.dat /home/h487/data/parquet/run${1}.parquet #--max-blocks 100000
+#streamingv1_to_parquet.py /mnt/data/hdd/HH015/nestdaq/tdcdata/00/run00${1}.dat /home/h487/data/parquet/run${1}.parquet #--max-blocks 100000
 
-cd /home/h487/notebooks/jan2026/mwdc
-python mwdc_processor.py /home/h487/data/parquet/run${1}.parquet --output-file /home/h487/data/parquet/run${1}_mwdc.parquet #--output-wire-data 
-cd -
+
+#cd /home/h487/notebooks/jan2026/mwdc
+#python mwdc_processor.py /home/h487/data/parquet/run${1}.parquet --output-file /home/h487/data/parquet/run${1}_mwdc.parquet --output-wire-data 
+#cd -
 
 cd /home/h487/notebooks/jan2026/srppac
-python srppac_processor.py /home/h487/data/parquet/run${1}.parquet --output-file /home/h487/data/parquet/run${1}_srppac.parquet --output-strip-data --preamp-type asagi
-#python join_mwdc_srppac.py /home/h487/data/parquet/run${1}
+python srppac_processor.py /home/h487/data/parquet/run${1}.parquet --output-file /home/h487/data/parquet/run${1}_srppac.parquet --preamp-type asagi #--output-strip-data
+python join_mwdc_srppac.py /home/h487/data/parquet/run${1}
 cd -
