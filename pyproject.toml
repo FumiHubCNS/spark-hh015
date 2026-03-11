@@ -19,11 +19,13 @@ dependencies = [
   "ipython>=9.10.0",
   "ipywidgets>=8.1.8",
   "marimo-lib",
+  "samidare-lib",
   "spark-oedo",
   "anywidget>=0.9.21",
 ]
 
 [tool.uv.sources]
+samidare-lib = { git = "https://github.com/FumiHubCNS/samidare-lib"} 
 marimo-lib = { git = "https://github.com/FumiHubCNS/marimo-lib"} 
 spark-oedo = { git = "https://github.com/FumiHubCNS/spark-oedo.git" , rev = "uv-package" }
 
